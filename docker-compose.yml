@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=password
+
+  redis:
+    image: redis:7.0-alpine
+    container_name: redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --requirepass password
+
+  server:
+    build:
+      context: ./server
+    container_name: ad-explorer-server
+    restart: always
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./server:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+      - MONGO_URI=mongodb://admin:password@mongodb:27017/ad_explorer?authSource=admin
+      - REDIS_URL=redis://default:password@redis:6379
+      - PORT=5000
+      - FB_API_VERSION=v18.0
+      - FB_ACCESS_TOKEN=YOUR_FB_ACCESS_TOKEN
+    depends_on:
+      - mongodb
+      - redis
+
+  client:
+    build:
+      context: ./client
+    container_name: ad-explorer-client
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./client:/app
+      - /app/node_modules
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000/api
+    depends_on:
+      - server
+
+volumes:
+  mongodb_data:
+  redis_data:
