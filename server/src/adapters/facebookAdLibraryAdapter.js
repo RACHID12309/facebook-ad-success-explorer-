@@ -1,22 +1,5 @@
-// src/adapters/facebookAdLibraryAdapter.js
-const axios = require('axios');
-const { promisify } = require('util');
-const redis = require('../services/redis');
-const logger = require('../utils/logger');
-const { calculateBackoff } = require('../utils/rateLimiter');
-
-class FacebookAdLibraryAdapter {
-  constructor(config) {
-    this.apiVersion = config.apiVersion || 'v18.0';
-    this.baseUrl = `https://graph.facebook.com/${this.apiVersion}/ads_archive`;
-    this.accessToken = config.accessToken;
-    this.redisClient = redis.getClient();
-    this.rateLimitWindow = {
-      requests: 0,
-      resetTime: Date.now() + 3600000, // 1 hour window
-      maxRequests: 1000 // Adjust based on your rate limits
-    };
-  }
+// Partial fix for src/adapters/facebookAdLibraryAdapter.js
+// Focus on the searchAds method
 
   /**
    * Search for ads based on keywords and filters
@@ -24,26 +7,41 @@ class FacebookAdLibraryAdapter {
    * @returns {Promise<Object>} - Search results
    */
   async searchAds(params) {
+    if (!params || !params.keywords) {
+      throw new Error('Keywords are required for ad search');
+    }
+
     const cacheKey = `fb_ads_${JSON.stringify(params)}`;
     
     // Try to get from cache first
-    const cachedData = await this.redisClient.get(cacheKey);
-    if (cachedData) {
-      logger.info('Cache hit for ad search');
-      return JSON.parse(cachedData);
+    try {
+      const redisClient = await this.redisClient;
+      const cachedData = await redisClient.get(cacheKey);
+      if (cachedData) {
+        logger.info('Cache hit for ad search');
+        return JSON.parse(cachedData);
+      }
+    } catch (redisError) {
+      logger.warn('Redis error when fetching cache', redisError);
+      // Continue with API call if cache fails
     }
     
     // Check rate limits before proceeding
     await this.checkRateLimits();
     
     try {
+      // Convert country parameter to array if needed
+      const countries = params.countries ? 
+        (Array.isArray(params.countries) ? params.countries : [params.countries]) : 
+        ['US'];
+      
       const response = await axios.get(this.baseUrl, {
         params: {
           access_token: this.accessToken,
           search_terms: params.keywords,
-          ad_type: 'POLITICAL_AND_ISSUE_ADS',
-          ad_reached_countries: params.countries || ['US'],
-          ad_active_status: 'ALL',
+          ad_type: params.adType || 'ALL', // Allow flexible ad types instead of hardcoding
+          ad_reached_countries: countries,
+          ad_active_status: params.activeStatus || 'ALL',
           fields: [
             'id',
             'ad_creation_time',
@@ -61,20 +59,37 @@ class FacebookAdLibraryAdapter {
             'impressions',
             'spend'
           ].join(','),
-          limit: params.limit || 25
-        }
+          limit: Math.min(1000, params.limit || 25) // Cap limit at 1000 to prevent abuse
+        },
+        timeout: 30000 // 30-second timeout for API calls
       });
+      
+      // Validate response data
+      if (!response.data || !Array.isArray(response.data.data)) {
+        logger.warn('Invalid response format from Facebook Ad API', { 
+          responseStatus: response.status,
+          responseData: typeof response.data 
+        });
+        
+        // Return a default structure to prevent errors
+        return { data: [], paging: {} };
+      }
       
       // Update rate limit counter
       this.rateLimitWindow.requests++;
       
       // Cache the results
-      await this.redisClient.set(
-        cacheKey, 
-        JSON.stringify(response.data),
-        'EX',
-        3600 // Cache for 1 hour
-      );
+      try {
+        await this.redisClient.set(
+          cacheKey, 
+          JSON.stringify(response.data),
+          'EX',
+          3600 // Cache for 1 hour
+        );
+      } catch (cacheError) {
+        logger.warn('Failed to cache Facebook Ad API results', cacheError);
+        // Continue even if caching fails
+      }
       
       return response.data;
     } catch (error) {
@@ -83,95 +98,29 @@ class FacebookAdLibraryAdapter {
         logger.warn('Rate limit exceeded for Facebook Ad Library API');
         
         // Apply exponential backoff
-        const backoffTime = calculateBackoff(error.response.headers['retry-after'] || 30);
+        const retryAfter = error.response.headers['retry-after'] || 30;
+        const backoffTime = calculateBackoff(retryAfter);
+        
+        logger.info(`Backing off for ${backoffTime}ms before retrying`);
         await new Promise(resolve => setTimeout(resolve, backoffTime));
         
         // Retry the request
         return this.searchAds(params);
       }
       
-      logger.error('Error fetching ads from Facebook Ad Library', error);
-      throw error;
-    }
-  }
-  
-  /**
-   * Get detailed information about a specific ad
-   * @param {string} adId - Facebook Ad ID
-   * @returns {Promise<Object>} - Ad details
-   */
-  async getAdDetails(adId) {
-    const cacheKey = `fb_ad_${adId}`;
-    
-    // Try to get from cache first
-    const cachedData = await this.redisClient.get(cacheKey);
-    if (cachedData) {
-      return JSON.parse(cachedData);
-    }
-    
-    // Check rate limits
-    await this.checkRateLimits();
-    
-    try {
-      const response = await axios.get(`${this.baseUrl}/${adId}`, {
-        params: {
-          access_token: this.accessToken,
-          fields: [
-            'id',
-            'ad_creation_time',
-            'ad_creative_bodies',
-            'ad_creative_link_titles',
-            'ad_creative_link_descriptions',
-            'ad_creative_link_captions',
-            'ad_delivery_start_time',
-            'ad_delivery_stop_time',
-            'ad_snapshot_url',
-            'page_id',
-            'page_name',
-            'demographic_distribution',
-            'region_distribution',
-            'impressions',
-            'spend'
-          ].join(',')
-        }
+      // Handle authentication errors
+      if (error.response && error.response.status === 401) {
+        logger.error('Facebook Ad API authentication failed - check your access token');
+        throw new Error('Authentication failed with Facebook Ad API');
+      }
+      
+      // Handle other errors
+      logger.error('Error fetching ads from Facebook Ad Library', {
+        error: error.message,
+        status: error.response?.status,
+        data: error.response?.data
       });
       
-      // Update rate limit counter
-      this.rateLimitWindow.requests++;
-      
-      // Cache the results
-      await this.redisClient.set(
-        cacheKey, 
-        JSON.stringify(response.data),
-        'EX',
-        86400 // Cache for 24 hours (longer since individual ad details change less frequently)
-      );
-      
-      return response.data;
-    } catch (error) {
-      logger.error(`Error fetching ad details for ID ${adId}`, error);
       throw error;
     }
   }
-  
-  /**
-   * Check and manage rate limits
-   * @private
-   */
-  async checkRateLimits() {
-    // Reset counter if the window has passed
-    if (Date.now() > this.rateLimitWindow.resetTime) {
-      this.rateLimitWindow.requests = 0;
-      this.rateLimitWindow.resetTime = Date.now() + 3600000; // Reset for next hour
-    }
-    
-    // If we're approaching the limit, apply backoff
-    if (this.rateLimitWindow.requests >= this.rateLimitWindow.maxRequests * 0.9) {
-      logger.warn('Approaching rate limit, applying backoff');
-      const timeToWait = this.rateLimitWindow.resetTime - Date.now();
-      await new Promise(resolve => setTimeout(resolve, Math.min(timeToWait, 30000))); // Wait at most 30 seconds
-    }
-  }
-}
-
-module.exports = FacebookAdLibraryAdapter;
