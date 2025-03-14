@@ -19,17 +19,17 @@ router.use(rateLimiterMiddleware({
 router.get('/search', adController.searchSuccessfulAds);
 
 /**
- * @route   GET /api/ads/:adId
- * @desc    Get details of a specific ad
- * @access  Public
- */
-router.get('/:adId', adController.getAdDetails);
-
-/**
  * @route   GET /api/ads/patterns/success
  * @desc    Get patterns from successful ads
  * @access  Public
  */
 router.get('/patterns/success', adController.getSuccessPatterns);
+
+/**
+ * @route   GET /api/ads/:adId
+ * @desc    Get details of a specific ad
+ * @access  Public
+ */
+router.get('/:adId', adController.getAdDetails);
 
 module.exports = router;
