@@ -5,10 +5,19 @@ const helmet = require('helmet');
 const mongoose = require('mongoose');
 const redis = require('./services/redis');
 const logger = require('./utils/logger');
+const fs = require('fs');
+const path = require('path');
 
 // Create Express app
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// Ensure logs directory exists
+const logsDir = path.join(__dirname, '..', 'logs');
+if (!fs.existsSync(logsDir)) {
+  fs.mkdirSync(logsDir, { recursive: true });
+  logger.info('Created logs directory');
+}
 
 // Middleware
 app.use(helmet());
@@ -20,9 +29,10 @@ const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI || 'mongodb://admin:password@localhost:27017/ad_explorer?authSource=admin');
     logger.info('MongoDB connected');
+    return true;
   } catch (error) {
     logger.error('MongoDB connection error:', error);
-    process.exit(1);
+    return false;
   }
 };
 
@@ -31,9 +41,11 @@ const connectRedis = async () => {
   try {
     await redis.connect();
     logger.info('Redis connected');
+    return true;
   } catch (error) {
     logger.error('Redis connection error:', error);
-    // Continue even if Redis fails
+    logger.warn('Application will continue without Redis caching');
+    return false;
   }
 };
 
@@ -47,7 +59,14 @@ app.use('/api/ads', require('./routes/ads'));
 
 // Start server
 const startServer = async () => {
-  await connectDB();
+  // MongoDB connection is critical - don't start if it fails
+  const dbConnected = await connectDB();
+  if (!dbConnected) {
+    logger.error('Failed to connect to MongoDB. Application cannot start.');
+    process.exit(1);
+  }
+  
+  // Redis connection is helpful but not critical
   await connectRedis();
   
   app.listen(PORT, () => {
