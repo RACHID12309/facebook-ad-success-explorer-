@@ -5,6 +5,7 @@ class RedisService {
   constructor() {
     this.client = null;
     this.isConnected = false;
+    this.connectionPromise = null;
   }
 
   async connect() {
@@ -12,33 +13,49 @@ class RedisService {
       return this.client;
     }
 
+    // If a connection attempt is already in progress, return that promise
+    if (this.connectionPromise) {
+      return this.connectionPromise;
+    }
+
     try {
-      this.client = createClient({
-        url: process.env.REDIS_URL || 'redis://default:password@localhost:6379'
+      this.connectionPromise = new Promise((resolve, reject) => {
+        this.client = createClient({
+          url: process.env.REDIS_URL || 'redis://default:password@localhost:6379'
+        });
+
+        this.client.on('error', (err) => {
+          logger.error('Redis Error:', err);
+          this.isConnected = false;
+          reject(err);
+        });
+
+        this.client.on('connect', () => {
+          logger.info('Redis client connected');
+          this.isConnected = true;
+          resolve(this.client);
+        });
+
+        this.client.connect().catch(reject);
       });
 
-      this.client.on('error', (err) => {
-        logger.error('Redis Error:', err);
-        this.isConnected = false;
-      });
-
-      this.client.on('connect', () => {
-        logger.info('Redis client connected');
-        this.isConnected = true;
-      });
-
-      await this.client.connect();
-      return this.client;
+      return await this.connectionPromise;
     } catch (error) {
       logger.error('Redis connection error:', error);
+      this.connectionPromise = null;
       throw error;
     }
   }
 
-  getClient() {
+  async getClient() {
     if (!this.client || !this.isConnected) {
       logger.warn('Redis client requested but not connected, attempting to connect');
-      this.connect();
+      try {
+        await this.connect();
+      } catch (error) {
+        logger.error('Failed to connect to Redis on demand:', error);
+        throw new Error('Redis client unavailable');
+      }
     }
     return this.client;
   }
@@ -47,6 +64,7 @@ class RedisService {
     if (this.client && this.isConnected) {
       await this.client.quit();
       this.isConnected = false;
+      this.connectionPromise = null;
       logger.info('Redis client disconnected');
     }
   }
